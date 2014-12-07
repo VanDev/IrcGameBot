@@ -1,80 +1,13 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Net.Sockets;
-using System.Security.Cryptography;
-using System.Text;
 using System.Threading;
-using NUnit.Framework;
 using NetIrc2;
-using NetIrc2.Events;
 
 namespace ch_ircbot
 {
-
-    [TestFixture]
-    public class TF
-    {
-        [Test]
-        public void TestTuid()
-        {
-            for (int i = 0; i < 16; ++i)
-            {
-                var tuid = Tuid.New();
-                Debug.WriteLine(tuid);
-                Assert.That(Tuid.Valid(tuid));
-                Assert.That(!Tuid.Valid("SNHdh3ZaaiWZbphyNv3twO6tMri2PgbHdB"));
-            }
-        }
-    }
-
-    internal sealed class Tuid
-    {
-        private static SHA1Managed sha1Managed = new SHA1Managed();
-        private static string secretKey = "asdf_this_will_change";
-
-        internal static string New()
-        {
-            var g = Guid.NewGuid().ToByteArray();
-            var t = BitConverter.GetBytes(DateTime.UtcNow.ToBinary()).Reverse().ToArray();
-            Array.Copy(t,g,t.Length);
-            var gt = new Guid(g);
-            var gs = gt.ToString("N");
-            var gss = secretKey + "|" + gs + "|" +secretKey;
-            var h = sha1Managed.ComputeHash(Encoding.Default.GetBytes(gss)).Take(8);
-            var b = g.Concat(h);
-            return Convert.ToBase64String(b.ToArray())
-                .Replace("Z","Za")
-                .Replace("+","Zb")
-                .Replace("/","Zc")
-                .Replace("=","Zd");
-        }
-
-        internal static bool Valid(string tuid)
-        {
-            var b = Convert.FromBase64String(tuid.Replace("Zd","=").Replace("Zc","/").Replace("Zb","+").Replace("Za","Z"));
-            // 8 time, 8 guid, 8 sha
-            if (b.Length != 24) return false;
-
-            var gt = new Guid(b.Take(16).ToArray());
-            var gs = gt.ToString("N");
-            var gss = secretKey + "|" + gs + "|" + secretKey;
-            var h = sha1Managed.ComputeHash(Encoding.Default.GetBytes(gss)).Take(8).ToArray();
-            return !h.Where((t, i) => t != b[16 + i]).Any();
-        }
-
-        internal static DateTime When(string tuid)
-        {
-            // assumes Valid
-            var b = Convert.FromBase64String(tuid.Replace("Zd", "=").Replace("Zc", "/").Replace("Zb", "+").Replace("Za", "Z"));
-            var dt = b.Take(8).Reverse().ToArray();
-            return DateTime.FromBinary(BitConverter.ToInt64(dt,0));
-        }
-    }
-
     internal static class Program
     {
         private const string Me = "user02ae4f8be6";
@@ -97,7 +30,7 @@ namespace ch_ircbot
             private string _player2Move;
 
             private IList<string> _log = new List<string>();
-            private DateTime _started;
+            private readonly DateTime _started;
 
             public string Player1 { get; private set; }
             public string Player2 { get; private set; }
@@ -128,23 +61,113 @@ namespace ch_ircbot
                         }
                         return "NICETRY!";
                     }
-                    return "HAHA YOU FUNNY!";
+                    return "HAHA, YOU FUNNY!";
                 }
+            }
+
+            private static readonly TimeSpan MatchTimeout = TimeSpan.FromSeconds(10);
+            public bool TryResolve()
+            {
+                PlayerState p1;
+                PlayerState p2;
+                Players.TryGetValue(Player1, out p1);
+                Players.TryGetValue(Player2, out p2);
+
+                if (p1 == null)
+                {
+                    if (p2 == null)
+                    {
+                        return true;
+                    }
+                    p2.Wins++;
+                    return true;
+                }
+                if (p2 == null)
+                {
+                    p1.Wins++;
+                    return true;
+                }
+
+                if (_player1Move != null && _player2Move != null)
+                {
+
+                    if (_player1Move == _player2Move)
+                    {
+                        p1.Ties++;
+                        p2.Ties++;
+                    }
+                    else
+                    {
+                        if ((_player1Move == "ROCK" && _player2Move == "SCISSORS")
+                            || (_player1Move == "SCISSORS" && _player2Move == "PAPER")
+                            || (_player1Move == "PAPER" && _player2Move == "ROCK"))
+                        {
+                            p1.Wins++;
+                            p2.Losses++;
+                        }
+                        else
+                        {
+                            p2.Wins++;
+                            p1.Losses++;
+                        }
+                    }
+                    p1.RemoveMatch(this);
+                    p2.RemoveMatch(this);
+                    return true;
+                }
+                var timeout = DateTime.UtcNow - MatchTimeout;
+                if (_started > timeout)
+                {
+                    if (_player1Move != null)
+                    {
+                        p2.Wins++;
+                        return true;
+                    }
+                    p1.Wins++;
+                    return true;
+                }
+                return false;
             }
         }
 
         sealed class PlayerState
         {
-            private string _name;
-            private int _wins;
-            private int _losses;
-            private DateTime _lastCommunication;
+            private static readonly TimeSpan LivelynessTimeSpan = TimeSpan.FromSeconds(30);
+
+            public int Wins { get; set; }
+            public int Losses { get; set; }
+            public int Ties { get; set; }
+            public DateTime LastCommunication { get; set; }
+            public bool Alive { get { return (DateTime.UtcNow - LastCommunication).Duration() < LivelynessTimeSpan; } }
+
+            private int _matchCount;
+
+            public void AddMatch(MatchState ms)
+            {
+                Interlocked.Increment(ref _matchCount);
+            }
+            public void RemoveMatch(MatchState ms)
+            {
+                Interlocked.Decrement(ref _matchCount);
+            }
+
+            public bool Free { get { return _matchCount == 0; } }
 
             public PlayerState(string name)
             {
-                _name = name;
-                _wins = 0;
-                _losses = 0;
+                Name = name;
+                LastCommunication = GetTime();
+                Wins = 0;
+                Losses = 0;
+            }
+
+            public string Name { get; private set; }
+
+            public bool PingPending { get; set; }
+
+            public int Played()
+            {
+                return Wins + Losses + Ties;
             }
         }
 
@@ -152,6 +175,7 @@ namespace ch_ircbot
         {
             return Tuid.New();
         }
+
         private static string ParseLine(String line)
         {
             var bits = line.Split(LineSeparator, StringSplitOptions.None);
@@ -163,6 +187,10 @@ namespace ch_ircbot
             }
             if (bits[2].Contains("PONG"))
             {
+                var player = UpdateLastCommunicationTime(bits[1]);
+                if(player == null)
+                    return "WHO ARE YOU?!";
+                player.PingPending = false;
                 return "ACK!";
             }
             if (bits[2].Contains("NEWMATCH"))
@@ -186,6 +214,9 @@ namespace ch_ircbot
 
             if (bits[2].Contains("MATCH"))
             {
+                if (UpdateLastCommunicationTime(bits[1]) == null)
+                    return "WHO ARE YOU?!!";
+
                 var match = bits[2].Split(' ');
                 if (match.Length != 3)
                     return "NO";
@@ -203,6 +234,17 @@ namespace ch_ircbot
                 }
 
                 return ms.Move(bits[1], match[2]);
+            }
+            return null;
+        }
+
+        private static PlayerState UpdateLastCommunicationTime(string player)
+        {
+            PlayerState ps;
+            if (Players.TryGetValue(player, out ps))
+            {
+                ps.LastCommunication = GetTime();
+                return ps;
             }
             return null;
         }
@@ -298,15 +340,41 @@ namespace ch_ircbot
                             Thread.Sleep(100);
 
                             var newMatch = CreateMatch();
-                            if (newMatch == null) 
-                                continue;
-                            x.Message(newMatch.Player1, Record(sw, newMatch.Player1, "NEWMATCH " + newMatch.Mode + " " + newMatch.Id + " " + newMatch.Player2));
-                            x.Message(newMatch.Player2, Record(sw, newMatch.Player2, "NEWMATCH " + newMatch.Mode + " " + newMatch.Id + " " + newMatch.Player1));
-                        }
+                            if (newMatch != null)
+                            {
+                                Matches[newMatch.Id] = newMatch;
+                                x.Message(newMatch.Player1,
+                                    Record(sw, newMatch.Player1,
+                                        "NEWMATCH " + newMatch.Mode + " " + newMatch.Id + " " + newMatch.Player2));
+                                x.Message(newMatch.Player2,
+                                    Record(sw, newMatch.Player2,
+                                        "NEWMATCH " + newMatch.Mode + " " + newMatch.Id + " " + newMatch.Player1));
+                            }
 
+                            var pingTime = GetTime().Add(TimeSpan.FromSeconds(-10));
+                            foreach (var ps in Players.Values.Where(p=>!p.PingPending))
+                            {
+                                if (ps.LastCommunication < pingTime)
+                                {
+                                    ps.PingPending = true;
+                                    x.Message(ps.Name, "PING");
+                                }
+                            }
+
+                            foreach (var id in Matches.Values.Where(match => match.TryResolve()).Select(match => match.Id))
+                            {
+                                MatchState ms;
+                                Matches.TryRemove(id, out ms);
+                            }
+                        }
                     }
                 }
             }
+        }
+
+        private static DateTime GetTime()
+        {
+            return DateTime.UtcNow;
         }
 
         private static void RestoreState()
@@ -338,30 +406,35 @@ namespace ch_ircbot
             return ParseLine(line);
         }
 
-        static Random _r = new Random();
+        static readonly Random Rand = new Random();
 
         private static MatchState CreateMatch()
         {
-            var possibles = Players.Where(x => x.Alive && x.Free).ToArray();
+            var possibles = Players.Values.Where(x => x.Alive && x.Free).ToArray();
             if (possibles.Length < 2)
             {
-                possibles = Players.Where(x => x.Alive);
+                possibles = Players.Values.Where(x => x.Alive).ToArray();
             }
             if (possibles.Length < 2)
                 return null;
 
-            
-            // find players that are 1) alive, and 2) not in a match
-            // if at least two
-                // pick two at random
-                // start a match
-            // else
-            //  find players that are alive
-            //  if at least two
-            //    pick two at random
-            //    start a match
+            Swap(ref possibles, Rand.Next(0, possibles.Length), 0);
+            Swap(ref possibles, Rand.Next(1, possibles.Length), 1);
 
-            return null;
+            var p1 = possibles[0];
+            var p2 = possibles[1];
+            var ms = new MatchState(p1.Name, p2.Name);
+            p1.AddMatch(ms);
+            p2.AddMatch(ms);
+            return ms;
+        }
+
+        private static void Swap<T>(ref T[] arr, int i, int j)
+        {
+            if (i == j) return;
+            var temp = arr[i];
+            arr[i] = arr[j];
+            arr[j] = temp;
         }
     }
 }
