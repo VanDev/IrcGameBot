@@ -26,6 +26,21 @@ namespace ch_ircbot
         private static DateTime _lastMatchCreated = DateTime.MinValue;
         private static readonly TimeSpan CreationDelay = TimeSpan.FromSeconds(3);
         private static readonly char[] SpaceSeparator = new[] {' '};
+        private static readonly IEnumerable<Tuple<string, string>> Nothing = Enumerable.Empty<Tuple<string, string>>();
+
+        private static readonly IDictionary<string, Func<string, string, string[], IEnumerable<Tuple<string, string>>>> Commands = new Dictionary<string, Func<string, string, string[], IEnumerable<Tuple<string, string>>>>
+            {
+                    {"HI", HandleRegister},
+                    {"REGISTER", HandleRegister},
+                    {"PONG", HandlePong},
+                    {"NEWMATCH", HandleNewMatch},
+                    {"MATCHLOG", HandleMatchlog},
+                    {"MATCH", HandleMatch},
+                    {"LISTMATCHES", HandleListMatches},
+                    {"LEADERBOARD", HandleLeaderboard},
+                    {"RESULTMATCH", HandleResultsMatch},
+                    {"STAT", HandleStat}
+                };
 
         private static string EventId()
         {
@@ -36,238 +51,255 @@ namespace ch_ircbot
         {
             Console.WriteLine(line);
             var bits = line.Split(LineSeparator, StringSplitOptions.None);
-            if (bits.Length != 3) yield break;
+            if (bits.Length != 3)
+                return Nothing;
 
             var eid = bits[0];
             var playerName = bits[1];
             var command = bits[2];
-            if (command.StartsWith("REGISTER") || command.StartsWith("HI"))
+            var commandbits = command.Split(SpaceSeparator, StringSplitOptions.RemoveEmptyEntries);
+
+            Func<string, string, string[], IEnumerable<Tuple<string, string>>> handler;
+            if (Commands.TryGetValue(commandbits[0], out handler))
             {
-                PlayerState ps;
-                if (Players.TryGetValue(playerName, out ps))
-                {
-                    ps.PingPending = false;
-                    yield return Tuple.Create(playerName, "OK!!");
-                    yield break;
-                }
-                if (Players.TryAdd(playerName, new PlayerState(playerName)))
-                {
-                    yield return Tuple.Create(playerName, "OK!");
-                    yield break;
-                }
-                yield return Tuple.Create(playerName, "OK?!");
+                return handler(eid, playerName, commandbits);
+            }
+            else
+            {
+                return Nothing;
+            }
+        }
+
+        private static IEnumerable<Tuple<string, string>> HandleLeaderboard(string eid, string playerName,
+            string[] commandbits)
+        {
+            yield return Tuple.Create(playerName, String.Join("; ",
+                Players.Values.OrderByDescending(p => p.Score())
+                    .Take(10)
+                    .Select(
+                        p =>
+                            p.Name + " score=" + (p.Score().ToString("F3")) + " played=" +
+                                (p.Wins + p.Ties + p.Losses))));
+            yield break;
+        }
+
+        private static IEnumerable<Tuple<string, string>> HandleMatch(string eid, string playerName,
+            string[] commandbits)
+        {
+            if (UpdateLastCommunicationTime(playerName) == null)
+            {
+                yield return Tuple.Create(playerName, "WHO ARE YOU?!!");
                 yield break;
             }
 
-            if (command.StartsWith("PONG"))
+            if (commandbits.Length != 3)
             {
-                var player = UpdateLastCommunicationTime(playerName);
-                if (player == null)
-                {
-                    yield return Tuple.Create(playerName, "WHO ARE YOU?!");
-                    yield break;
-                }
-                player.PingPending = false;
-                yield return Tuple.Create(playerName, "ACK!");
+                yield return Tuple.Create(playerName, "NO");
+                yield break;
+            }
+            if (commandbits[0] != "MATCH")
+            {
+                yield return Tuple.Create(playerName, "NO!");
+                yield break;
+            }
+            var matchID = commandbits[1];
+            if (!Tuid.Valid(matchID))
+            {
+                yield return Tuple.Create(playerName, "NOPE");
+                yield break;
+            }
+            var matchMove = commandbits[2];
+            if (!Moves.Contains(matchMove))
+            {
+                yield return Tuple.Create(playerName, "NOPE!");
                 yield break;
             }
 
-            if (command.StartsWith("MATCHLOG"))
+            MatchState ms;
+            if (!Matches.TryGetValue(matchID, out ms))
             {
-                yield return Tuple.Create(playerName, "SORRY");
+                yield return Tuple.Create(playerName, "INVALID!");
                 yield break;
             }
 
-            if (command.StartsWith("LISTMATCHES"))
+            if (ms.Resolved)
             {
-                var p = UpdateLastCommunicationTime(playerName);
-                if (p != null)
-                {
-                    yield return
-                        Tuple.Create(playerName,
-                            string.Join(", ", p.Matches.Values.Where(m => !m.Resolved).Select(m => m.Id)));
-                }
+                yield return Tuple.Create(playerName, "MATCH IS ALREADY RESOLVED.");
                 yield break;
             }
 
-            if (command.StartsWith("NEWMATCH"))
-            {
-                var newmatch = command.Split(SpaceSeparator, StringSplitOptions.RemoveEmptyEntries);
-                if (newmatch.Length != 4)
-                {
-                    yield break;
-                }
-                if (playerName != VanDevBot)
-                {
-                    yield break;
-                }
-                var com = newmatch[0];
-                if (com != "NEWMATCH")
-                {
-                    yield break;
-                }
-                var mode = newmatch[1];
-                var p1 = newmatch[2];
-                var p2 = newmatch[3];
+            yield return Tuple.Create(playerName, ms.Move(playerName, matchMove));
+            yield break;
+        }
 
+        private static IEnumerable<Tuple<string, string>> HandleStat(string eid, string playerName, string[] commandbits)
+        {
+            var ps = UpdateLastCommunicationTime(playerName);
+
+            if (ps != null)
+            {
+                yield return
+                    Tuple.Create(playerName,
+                        String.Format("{0} WINS {1} LOSS {2} TIE {3} SCORE", ps.Wins, ps.Losses, ps.Ties, ps.Score()))
+                    ;
+                yield break;
+            }
+            yield return Tuple.Create(playerName, "YOU DO NOT EXIST!");
+            yield break;
+        }
+
+        private static IEnumerable<Tuple<string, string>> HandleResultsMatch(string eid, string playerName,
+            string[] commandbits)
+        {
+            if (commandbits.Length < 3)
+            {
+                yield break;
+            }
+            if (playerName != VanDevBot)
+            {
+                yield break;
+            }
+            var mid = commandbits[1];
+            if (!Tuid.Valid(mid))
+            {
+                yield break;
+            }
+            string mresult = string.Empty;
+            if (commandbits.Length==3)
+                mresult = commandbits[2];
+            if (commandbits.Length == 5)
+                mresult = commandbits[3];
+
+            MatchState ms;
+            if (Matches.TryGetValue(mid, out ms))
+            {
+                ms.Resolved = true;
                 PlayerState player1;
-                Players.TryGetValue(p1, out player1);
+                Players.TryGetValue(ms.Player1, out player1);
                 PlayerState player2;
-                Players.TryGetValue(p2, out player2);
+                Players.TryGetValue(ms.Player2, out player2);
 
-                if (player1 == null || player2 == null)
-                    yield break;
-
-                var ms = new MatchState(mode, eid, p1, p2);
-
-                player1.AddMatch(ms);
-                player2.AddMatch(ms);
-                Matches[ms.Id] = ms;
-                yield return Tuple.Create(p1, "MATCH " + mode + " " + eid + " " + p2);
-                yield return Tuple.Create(p2, "MATCH " + mode + " " + eid + " " + p1);
-                yield break;
-            }
-
-            if (command.StartsWith("RESULTMATCH"))
-            {
-                var resultmatch = command.Split(SpaceSeparator, 3, StringSplitOptions.RemoveEmptyEntries);
-                if (resultmatch.Length != 3)
+                if (mresult == "WINS")
                 {
-                    yield break;
-                }
-                if (playerName != VanDevBot)
-                {
-                    yield break;
-                }
-                var com = resultmatch[0];
-                if (com != "RESULTMATCH")
-                {
-                    yield break;
-                }
-                var mid = resultmatch[1];
-                if (!Tuid.Valid(mid))
-                {
-                    yield break;
-                }
-                var mresult = resultmatch[2];
-
-                MatchState ms;
-                if (Matches.TryGetValue(mid, out ms))
-                {
-                    ms.Resolved = true;
-                    PlayerState player1;
-                    Players.TryGetValue(ms.Player1, out player1);
-                    PlayerState player2;
-                    Players.TryGetValue(ms.Player2, out player2);
-
-                    var mrbits = mresult.Split(SpaceSeparator, StringSplitOptions.RemoveEmptyEntries);
-
-                    if (mrbits.Length > 1 && mrbits[1] == "WINS")
+                    if (commandbits[2] == ms.Player1)
                     {
-                        if (mrbits[0] == ms.Player1)
-                        {
-                            if (player1 != null)
-                                ++player1.Wins;
-                            if (player2 != null)
-                                ++player2.Losses;
-                        }
-                        if (mrbits[0] == ms.Player2)
-                        {
-                            if (player1 != null)
-                                ++player1.Losses;
-                            if (player2 != null)
-                                ++player2.Wins;
-                        }
+                        if (player1 != null)
+                            ++player1.Wins;
+                        if (player2 != null)
+                            ++player2.Losses;
                     }
-                    else
+                    if (commandbits[2] == ms.Player2)
                     {
-                        if (player1 != null) ++player1.Ties;
-                        if (player2 != null) ++player2.Ties;
+                        if (player1 != null)
+                            ++player1.Losses;
+                        if (player2 != null)
+                            ++player2.Wins;
                     }
-                    if (player1 != null)
-                        yield return Tuple.Create(player1.Name, "MATCH " + mid + " " + mresult);
-                    if (player2 != null)
-                        yield return Tuple.Create(player2.Name, "MATCH " + mid + " " + mresult);
                 }
-                yield break;
+                else
+                {
+                    if (player1 != null) ++player1.Ties;
+                    if (player2 != null) ++player2.Ties;
+                }
+                var message = "MATCH " + string.Join(" ", commandbits.Skip(1));
+                if (player1 != null)
+                {
+                    yield return Tuple.Create(player1.Name, message);
+                }
+                if (player2 != null)
+                    yield return Tuple.Create(player2.Name, message);
             }
+            yield break;
+        }
 
-            if (command.StartsWith("STAT"))
+        private static IEnumerable<Tuple<string, string>> HandleNewMatch(string eid, string playerName,
+            string[] commandbits)
+        {
+            if (commandbits.Length != 4)
             {
-                var ps = UpdateLastCommunicationTime(playerName);
-
-                if (ps != null)
-                {
-                    yield return
-                        Tuple.Create(playerName,
-                            string.Format("{0} WINS {1} LOSS {2} TIE {3} SCORE", ps.Wins, ps.Losses, ps.Ties, ps.Score()))
-                        ;
-                    yield break;
-                }
-                yield return Tuple.Create(playerName, "YOU DO NOT EXIST!");
                 yield break;
             }
-
-            if (command.StartsWith("MATCH"))
+            if (playerName != VanDevBot)
             {
-                if (UpdateLastCommunicationTime(playerName) == null)
-                {
-                    yield return Tuple.Create(playerName, "WHO ARE YOU?!!");
-                    yield break;
-                }
-
-                var match = command.Split(SpaceSeparator, StringSplitOptions.RemoveEmptyEntries);
-                if (match.Length != 3)
-                {
-                    yield return Tuple.Create(playerName, "NO");
-                    yield break;
-                }
-                if (match[0] != "MATCH")
-                {
-                    yield return Tuple.Create(playerName, "NO!");
-                    yield break;
-                }
-                var matchID = match[1];
-                if (!Tuid.Valid(matchID))
-                {
-                    yield return Tuple.Create(playerName, "NOPE");
-                    yield break;
-                }
-                var matchMove = match[2];
-                if (!Moves.Contains(matchMove))
-                {
-                    yield return Tuple.Create(playerName, "NOPE!");
-                    yield break;
-                }
-
-                MatchState ms;
-                if (!Matches.TryGetValue(matchID, out ms))
-                {
-                    yield return Tuple.Create(playerName, "INVALID!");
-                    yield break;
-                }
-
-                if (ms.Resolved)
-                {
-                    yield return Tuple.Create(playerName, "MATCH IS ALREADY RESOLVED.");
-                    yield break;
-                }
-
-                yield return Tuple.Create(playerName, ms.Move(playerName, matchMove));
                 yield break;
             }
-
-            if (command.StartsWith("LEADERBOARD"))
+            var com = commandbits[0];
+            if (com != "NEWMATCH")
             {
-                yield return Tuple.Create(playerName, string.Join("; ",
-                    Players.Values.OrderByDescending(p => p.Score())
-                        .Take(10)
-                        .Select(
-                            p =>
-                                p.Name + " score=" + (p.Score().ToString("F3")) + " played=" +
-                                    (p.Wins + p.Ties + p.Losses))));
                 yield break;
             }
+            var mode = commandbits[1];
+            var p1 = commandbits[2];
+            var p2 = commandbits[3];
+
+            PlayerState player1;
+            Players.TryGetValue(p1, out player1);
+            PlayerState player2;
+            Players.TryGetValue(p2, out player2);
+
+            if (player1 == null || player2 == null)
+                yield break;
+
+            var ms = new MatchState(mode, eid, p1, p2);
+
+            player1.AddMatch(ms);
+            player2.AddMatch(ms);
+            Matches[ms.Id] = ms;
+            yield return Tuple.Create(p1, "MATCH " + mode + " " + eid + " " + p2);
+            yield return Tuple.Create(p2, "MATCH " + mode + " " + eid + " " + p1);
+            yield break;
+        }
+
+        private static IEnumerable<Tuple<string, string>> HandleListMatches(string eid, string playerName,
+            string[] commandbits)
+        {
+            var p = UpdateLastCommunicationTime(playerName);
+            if (p != null)
+            {
+                yield return
+                    Tuple.Create(playerName,
+                        String.Join(", ", p.Matches.Values.Where(m => !m.Resolved).Select(m => m.Id)));
+            }
+            yield break;
+        }
+
+        private static IEnumerable<Tuple<string, string>> HandleMatchlog(string eid, string playerName,
+            string[] commandbits)
+        {
+            yield return Tuple.Create(playerName, "SORRY");
+            yield break;
+        }
+
+        private static IEnumerable<Tuple<string, string>> HandlePong(string eid, string playerName, string[] commandbits)
+        {
+            var player = UpdateLastCommunicationTime(playerName);
+            if (player == null)
+            {
+                yield return Tuple.Create(playerName, "WHO ARE YOU?!");
+                yield break;
+            }
+            player.PingPending = false;
+            yield return Tuple.Create(playerName, "ACK!");
+            yield break;
+        }
+
+        private static IEnumerable<Tuple<string, string>> HandleRegister(string eid, string playerName,
+            string[] commandbits)
+        {
+            PlayerState ps;
+            if (Players.TryGetValue(playerName, out ps))
+            {
+                ps.PingPending = false;
+                yield return Tuple.Create(playerName, "OK!!");
+                yield break;
+            }
+            if (Players.TryAdd(playerName, new PlayerState(playerName)))
+            {
+                yield return Tuple.Create(playerName, "OK!");
+                yield break;
+            }
+            yield return Tuple.Create(playerName, "OK?!");
+            yield break;
         }
 
         private static PlayerState UpdateLastCommunicationTime(string player)
@@ -302,8 +334,11 @@ namespace ch_ircbot
 
             var notice = false;
             x.GotNotice +=
-                (sender, eventArgs) => { notice = eventArgs.Message.ToString().ToUpperInvariant().Contains("NO IDENT"); };
-
+                (sender, eventArgs) =>
+                    { notice = true; };
+            x.GotMotdBegin +=
+                (sender, eventArgs) =>
+                { notice = true; };
             x.GotMessage +=
                 (sender, eventArgs) =>
                     {
@@ -341,8 +376,8 @@ namespace ch_ircbot
             x.Connected += (sender, eventArgs) => { connected = true; };
             var joined = false;
 
-            x.Connect("chat.freenode.net");
-            x.LogIn(botname, "none", botname, "chat.freenode.net");
+            x.Connect(IrcServer);
+            x.LogIn(botname, "none", botname, IrcServer);
 
             for (;;)
             {
@@ -375,7 +410,9 @@ namespace ch_ircbot
                     using (var sw = new StreamWriter(logFileStream))
                     {
                         var x = new IrcClient();
-                        x.GotIrcError += (sender, eventArgs) => Console.WriteLine("GotIrcError: " + eventArgs.Error + " " + eventArgs.Data.ToString());
+                        x.GotIrcError +=
+                            (sender, eventArgs) =>
+                                Console.WriteLine("GotIrcError: " + eventArgs.Error + " " + eventArgs.Data.ToString());
                         x.GotMessage +=
                             (sender, eventArgs) =>
                                 {
@@ -393,26 +430,33 @@ namespace ch_ircbot
                                     foreach (var r in results)
                                         x.Message(r.Item1, r.Item2);
                                 };
-                        x.GotNotice += (sender, eventArgs) =>
-                            {
-                                Console.WriteLine("GotNotice: " + eventArgs.Message);
-                                notice = eventArgs.Message.ToString().ToUpperInvariant().Contains("NO IDENT");
-                            };
+                        x.GotNotice +=
+                            (sender, eventArgs) =>
+                            { notice = true; };
+                        x.GotMotdBegin +=
+                            (sender, eventArgs) =>
+                            { notice = true; };
+
+                        var joined = false;
+                        
                         x.Closed += (sender, eventArgs) =>
                             {
                                 Console.WriteLine("Closed");
                                 connected = false;
                                 notice = false;
+                                joined = false;
+                                Thread.Sleep(5000);
+                                x.Connect(IrcServer);
+                                x.LogIn(VanDevBot, "none", VanDevBot, IrcServer);
                             };
                         x.Connected += (sender, eventArgs) =>
                             {
                                 Console.WriteLine("Connected");
                                 connected = true;
                             };
-                        x.Connect("chat.freenode.net");
-                        x.LogIn(VanDevBot, "none", VanDevBot, "chat.freenode.net");
+                        x.Connect(IrcServer);
+                        x.LogIn(VanDevBot, "none", VanDevBot, IrcServer);
 
-                        var joined = false;
                         for (;;)
                         {
                             if (connected && notice && !joined)
@@ -435,7 +479,8 @@ namespace ch_ircbot
                             {
                                 foreach (
                                     var r in
-                                        Record(sw, VanDevBot, "NEWMATCH DEMO " + " " + newMatch.Item1 + " " + newMatch.Item2))
+                                        Record(sw, VanDevBot,
+                                            "NEWMATCH DEMO " + " " + newMatch.Item1 + " " + newMatch.Item2))
                                 {
                                     x.Message(r.Item1, r.Item2);
                                 }
@@ -453,7 +498,7 @@ namespace ch_ircbot
 
                             foreach (
                                 var ms in
-                                    Matches.Values.Where(match => match.TryResolve()))
+                                    Matches.Values.Where(TryResolve))
                             {
                                 foreach (var r in Record(sw, VanDevBot, "RESULTMATCH " + ms.Id + " " + ms.Result))
                                 {
@@ -496,7 +541,7 @@ namespace ch_ircbot
         private static IEnumerable<Tuple<string, string>> Record(TextWriter sw, string nickname, string message)
         {
             var eventID = EventId();
-            var line = string.Format("{0} | {1} | {2}", eventID, nickname, message);
+            var line = String.Format("{0} | {1} | {2}", eventID, nickname, message);
 
             sw.WriteLine(line);
             sw.Flush();
@@ -507,9 +552,9 @@ namespace ch_ircbot
         private static T[] InplaceShuffle<T>(this T[] arr)
         {
             var length = arr.Length;
-            for (int i = 0; i < length; ++i)
+            for (var i = 0; i < length; ++i)
             {
-                Swap(ref arr,i,Rand.Next(i, length));
+                Swap(ref arr, i, Rand.Next(i, length));
             }
             return arr;
         }
@@ -518,8 +563,12 @@ namespace ch_ircbot
         {
             if (_lastMatchCreated.Add(CreationDelay) > GetTime()) return null;
 
-            PlayerState[] possibles = null;
-            possibles = Players.Values.ToArray().InplaceShuffle().Where(x => x.Alive && x.AliveMatchCount < MaxSymoMatches).ToArray();
+            PlayerState[] possibles;
+            possibles =
+                Players.Values.ToArray()
+                    .InplaceShuffle()
+                    .Where(x => x.Alive && x.AliveMatchCount < MaxSymoMatches)
+                    .ToArray();
 
             if (possibles.Length < 2)
             {
@@ -536,135 +585,6 @@ namespace ch_ircbot
             var temp = arr[i];
             arr[i] = arr[j];
             arr[j] = temp;
-        }
-
-        private sealed class MatchState
-        {
-            private static readonly TimeSpan MatchTimeout = TimeSpan.FromSeconds(60);
-            private readonly object _lock = new object();
-            private readonly IList<string> _log = new List<string>();
-            private readonly DateTime _started;
-
-            private string _player1Move;
-            private string _player2Move;
-
-            public MatchState(string mode, string id, string player1, string player2)
-            {
-                Mode = mode;
-                Player1 = player1;
-                Player2 = player2;
-                Id = id;
-                _started = Tuid.When(Id);
-            }
-
-            public string Result { get; private set; }
-            public string Player1 { get; private set; }
-            public string Player2 { get; private set; }
-            public string Mode { get; private set; }
-            public string Id { get; private set; }
-
-            public bool Resolved { get; set; }
-
-            public string Move(string player, string move)
-            {
-                lock (_lock)
-                {
-                    _log.Add("MOVE " + player + " " + move);
-                    if (player == Player1)
-                    {
-                        if (_player1Move == null)
-                        {
-                            _player1Move = move;
-                            return "OK!";
-                        }
-                        return "NICETRY!";
-                    }
-                    if (player == Player2)
-                    {
-                        if (_player2Move == null)
-                        {
-                            _player2Move = move;
-                            return "OK!";
-                        }
-                        return "NICETRY!";
-                    }
-                    return "HAHA, YOU FUNNY!";
-                }
-            }
-
-            public bool TryResolve()
-            {
-                if (Resolved)
-                    return false;
-
-                PlayerState p1;
-                PlayerState p2;
-                Players.TryGetValue(Player1, out p1);
-                Players.TryGetValue(Player2, out p2);
-
-                if (p1 == null)
-                {
-                    if (p2 == null)
-                    {
-                        return true;
-                    }
-                    Result = p2.Name + " WINS FORFEIT";
-                    _log.Add(Result);
-                    return true;
-                }
-                if (p2 == null)
-                {
-                    Result = p1.Name + " WINS FORFEIT";
-                    _log.Add(Result);
-                    return true;
-                }
-
-                if (_player1Move != null && _player2Move != null)
-                {
-                    if (_player1Move == _player2Move)
-                    {
-                        Result = "TIE";
-                        _log.Add(Result);
-                    }
-                    else
-                    {
-                        if ((_player1Move == "ROCK" && _player2Move == "SCISSORS")
-                            || (_player1Move == "SCISSORS" && _player2Move == "PAPER")
-                            || (_player1Move == "PAPER" && _player2Move == "ROCK"))
-                        {
-                            Result = p1.Name + " WINS " + _player1Move;
-                            _log.Add(Result);
-                        }
-                        else
-                        {
-                            Result = p2.Name + " WINS " + _player2Move;
-                            _log.Add(Result);
-                        }
-                    }
-                    return true;
-                }
-                var now = GetTime();
-                if (_started.Add(MatchTimeout) < now)
-                {
-                    _log.Add("TIMEOUT");
-                    if (_player1Move == null && _player2Move != null)
-                    {
-                        Result = p1.Name + " WINS FORFEIT";
-                        _log.Add(Result);
-                        return true;
-                    }
-                    if (_player2Move != null && _player1Move != null)
-                    {
-                        Result = p2.Name + " WINS FORFEIT";
-                        _log.Add(Result);
-                        return true;
-                    }
-                    Result = "TIE";
-                    _log.Add("TIE");
-                    return true;
-                }
-                return false;
-            }
         }
 
         private sealed class PlayerState
@@ -718,5 +638,151 @@ namespace ch_ircbot
                 return Wins/(double) total;
             }
         }
+
+        private static readonly TimeSpan MatchTimeout = TimeSpan.FromSeconds(60);
+        private const string IrcServer = "ec2-54-173-131-206.compute-1.amazonaws.com";
+
+        static internal bool TryResolve(IMatchState ms)
+        {
+            if (ms.Resolved)
+                return false;
+
+            PlayerState p1;
+            PlayerState p2;
+            Players.TryGetValue(ms.Player1, out p1);
+            Players.TryGetValue(ms.Player2, out p2);
+
+            if (p1 == null)
+            {
+                if (p2 == null)
+                {
+                    return true;
+                }
+                ms.Result = p2.Name + " WINS FORFEIT";
+                ms.Log.Add(ms.Result);
+                return true;
+            }
+            if (p2 == null)
+            {
+                ms.Result = p1.Name + " WINS FORFEIT";
+                ms.Log.Add(ms.Result);
+                return true;
+            }
+
+            if (ms.Player1Move != null && ms.Player2Move != null)
+            {
+                if (ms.Player1Move == ms.Player2Move)
+                {
+                    ms.Result = "TIE";
+                    ms.Log.Add(ms.Result);
+                }
+                else
+                {
+                    if ((ms.Player1Move == "ROCK" && ms.Player2Move == "SCISSORS")
+                        || (ms.Player1Move == "SCISSORS" && ms.Player2Move == "PAPER")
+                        || (ms.Player1Move == "PAPER" && ms.Player2Move == "ROCK"))
+                    {
+                        ms.Result = p1.Name + " WINS " + ms.Player1Move;
+                        ms.Log.Add(ms.Result);
+                    }
+                    else
+                    {
+                        ms.Result = p2.Name + " WINS " + ms.Player2Move;
+                        ms.Log.Add(ms.Result);
+                    }
+                }
+                return true;
+            }
+            var now = GetTime();
+            if (ms.Started.Add(MatchTimeout) < now)
+            {
+                ms.Log.Add("TIMEOUT");
+                if (ms.Player1Move == null && ms.Player2Move != null)
+                {
+                    ms.Result = p1.Name + " WINS FORFEIT";
+                    ms.Log.Add(ms.Result);
+                    return true;
+                }
+                if (ms.Player2Move != null && ms.Player1Move != null)
+                {
+                    ms.Result = p2.Name + " WINS FORFEIT";
+                    ms.Log.Add(ms.Result);
+                    return true;
+                }
+                ms.Result = "TIE";
+                ms.Log.Add("TIE");
+                return true;
+            }
+            return false;
+        }
+    }
+
+    internal class MatchState : IMatchState
+    {
+        private readonly object _lock = new object();
+        public IList<string> Log { get; private set; }
+        public DateTime Started { get; private set; }
+
+        public MatchState(string mode, string id, string player1, string player2)
+        {
+            Log = new List<string>();
+            Mode = mode;
+            Player1 = player1;
+            Player2 = player2;
+            Id = id;
+            Started = Tuid.When(Id);
+        }
+
+        public string Result { get; set; }
+        public string Player1 { get; private set; }
+        public string Player2 { get; private set; }
+        public string Player1Move { get; private set; }
+        public string Player2Move { get; private set; }
+        public string Mode { get; private set; }
+        public string Id { get; private set; }
+
+        public bool Resolved { get; set; }
+
+        public string Move(string player, string move)
+        {
+            lock (_lock)
+            {
+                Log.Add("MOVE " + player + " " + move);
+                if (player == Player1)
+                {
+                    if (Player1Move == null)
+                    {
+                        Player1Move = move;
+                        return "OK!";
+                    }
+                    return "NICETRY!";
+                }
+                if (player == Player2)
+                {
+                    if (Player2Move == null)
+                    {
+                        Player2Move = move;
+                        return "OK!";
+                    }
+                    return "NICETRY!";
+                }
+                return "HAHA, YOU FUNNY!";
+            }
+        }
+    }
+
+    internal interface IMatchState
+    {
+        string Result { get; set; }
+        string Player1 { get; }
+        string Player2 { get; }
+        string Player1Move { get; }
+        string Player2Move { get; }
+        string Mode { get; }
+        string Id { get; }
+        bool Resolved { get; set; }
+        IList<string> Log { get; }
+        DateTime Started { get; }
+        string Move(string player, string move);
     }
 }
