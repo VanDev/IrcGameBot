@@ -10,7 +10,8 @@ namespace ch_ircbot
 {
     internal static class Program
     {
-        private const string Me = "VanDevBot7c34cb9";
+        private const string VanDevBot = "VanDevBot7c34cb9";
+        private const int MaxSymoMatches = 2;
         private static readonly string[] LineSeparator = new[] {" | "};
 
         private static readonly ConcurrentDictionary<string, PlayerState> Players =
@@ -19,13 +20,12 @@ namespace ch_ircbot
         private static readonly ConcurrentDictionary<string, MatchState> Matches =
             new ConcurrentDictionary<string, MatchState>();
 
-        private static readonly ISet<string> Moves = new HashSet<string> {"ROCK", "PAPER", "SISSORS"};
+        private static readonly ISet<string> Moves = new HashSet<string> {"ROCK", "PAPER", "SCISSORS"};
         private static readonly Random Rand = new Random();
 
         private static DateTime _lastMatchCreated = DateTime.MinValue;
         private static readonly TimeSpan CreationDelay = TimeSpan.FromSeconds(3);
         private static readonly char[] SpaceSeparator = new[] {' '};
-        private const int MaxSymoMatches = 2;
 
         private static string EventId()
         {
@@ -41,11 +41,24 @@ namespace ch_ircbot
             var eid = bits[0];
             var playerName = bits[1];
             var command = bits[2];
-            if (command.StartsWith("HI"))
+            if (command.StartsWith("REGISTER") || command.StartsWith("HI"))
             {
-                yield return Tuple.Create(playerName, "Hi!");
+                PlayerState ps;
+                if (Players.TryGetValue(playerName, out ps))
+                {
+                    ps.PingPending = false;
+                    yield return Tuple.Create(playerName, "OK!!");
+                    yield break;
+                }
+                if (Players.TryAdd(playerName, new PlayerState(playerName)))
+                {
+                    yield return Tuple.Create(playerName, "OK!");
+                    yield break;
+                }
+                yield return Tuple.Create(playerName, "OK?!");
                 yield break;
             }
+
             if (command.StartsWith("PONG"))
             {
                 var player = UpdateLastCommunicationTime(playerName);
@@ -84,7 +97,7 @@ namespace ch_ircbot
                 {
                     yield break;
                 }
-                if (playerName != Me)
+                if (playerName != VanDevBot)
                 {
                     yield break;
                 }
@@ -100,8 +113,8 @@ namespace ch_ircbot
                 PlayerState player1;
                 Players.TryGetValue(p1, out player1);
                 PlayerState player2;
-                Players.TryGetValue(p2, out player2); 
-                
+                Players.TryGetValue(p2, out player2);
+
                 if (player1 == null || player2 == null)
                     yield break;
 
@@ -122,7 +135,7 @@ namespace ch_ircbot
                 {
                     yield break;
                 }
-                if (playerName != Me)
+                if (playerName != VanDevBot)
                 {
                     yield break;
                 }
@@ -149,7 +162,7 @@ namespace ch_ircbot
 
                     var mrbits = mresult.Split(SpaceSeparator, StringSplitOptions.RemoveEmptyEntries);
 
-                    if (mrbits.Length>1 && mrbits[1] == "WINS")
+                    if (mrbits.Length > 1 && mrbits[1] == "WINS")
                     {
                         if (mrbits[0] == ms.Player1)
                         {
@@ -192,23 +205,6 @@ namespace ch_ircbot
                     yield break;
                 }
                 yield return Tuple.Create(playerName, "YOU DO NOT EXIST!");
-                yield break;
-            }
-            if (command.StartsWith("REGISTER"))
-            {
-                PlayerState ps;
-                if (Players.TryGetValue(playerName, out ps))
-                {
-                    ps.PingPending = false;
-                    yield return Tuple.Create(playerName, "OK!!");
-                    yield break;
-                }
-                if (Players.TryAdd(playerName, new PlayerState(playerName)))
-                {
-                    yield return Tuple.Create(playerName, "OK!");
-                    yield break;
-                }
-                yield return Tuple.Create(playerName, "OK?!");
                 yield break;
             }
 
@@ -264,7 +260,12 @@ namespace ch_ircbot
             if (command.StartsWith("LEADERBOARD"))
             {
                 yield return Tuple.Create(playerName, string.Join("; ",
-                    Players.Values.OrderByDescending(p => p.Score()).Take(10).Select(p => p.Name + " score=" + (p.Score().ToString("F3")) + " played=" + (p.Wins+p.Ties+p.Losses))));
+                    Players.Values.OrderByDescending(p => p.Score())
+                        .Take(10)
+                        .Select(
+                            p =>
+                                p.Name + " score=" + (p.Score().ToString("F3")) + " played=" +
+                                    (p.Wins + p.Ties + p.Losses))));
                 yield break;
             }
         }
@@ -278,6 +279,85 @@ namespace ch_ircbot
                 return ps;
             }
             return null;
+        }
+
+        private static void RockBot()
+        {
+            SimpleBot("VanDevRockBot", " SCISSORS");
+        }
+
+        private static void ScissorsBot()
+        {
+            SimpleBot("VanDevScissBot", " PAPER");
+        }
+
+        private static void PaperBot()
+        {
+            SimpleBot("VanDevPaperBot", " ROCK");
+        }
+
+        private static void SimpleBot(string botname, string move)
+        {
+            var x = new IrcClient();
+
+            var notice = false;
+            x.GotNotice +=
+                (sender, eventArgs) => { notice = eventArgs.Message.ToString().ToUpperInvariant().Contains("NO IDENT"); };
+
+            x.GotMessage +=
+                (sender, eventArgs) =>
+                    {
+                        var message = eventArgs.Message.ToString();
+
+                        if (eventArgs.Recipient.ToString() != botname)
+                            return;
+
+                        if (eventArgs.Sender.Nickname != VanDevBot)
+                            return;
+
+                        var bits = message.Split(SpaceSeparator, StringSplitOptions.RemoveEmptyEntries);
+
+                        if (bits.Length == 0) return;
+                        if (bits[0] == "PING")
+                        {
+                            x.Message(VanDevBot, "PONG");
+                            return;
+                        }
+                        if (bits.Length < 3) return;
+
+                        if (bits[0] == "MATCH")
+                        {
+                            Thread.Sleep(9*1000);
+                            x.Message(VanDevBot, "MATCH " + bits[2] + move);
+                        }
+                    };
+            var connected = false;
+
+            x.Closed += (sender, eventArgs) =>
+                {
+                    connected = false;
+                    notice = false;
+                };
+            x.Connected += (sender, eventArgs) => { connected = true; };
+            var joined = false;
+
+            x.Connect("chat.freenode.net");
+            x.LogIn(botname, "none", botname, "chat.freenode.net");
+
+            for (;;)
+            {
+                if (connected && notice && !joined)
+                {
+                    x.Join("#02ae4f8be6");
+                    x.Message("#02ae4f8be6", "test");
+                    x.Message(VanDevBot, "REGISTER");
+                    joined = true;
+                }
+
+                Thread.Sleep(100);
+                if (!joined)
+                    continue;
+            }
         }
 
         public static void Main(string[] args)
@@ -295,15 +375,7 @@ namespace ch_ircbot
                     using (var sw = new StreamWriter(logFileStream))
                     {
                         var x = new IrcClient();
-                        x.GotChannelListBegin += (sender, eventArgs) => Console.WriteLine("GotChannelListBegin");
-                        x.GotChannelListEnd += (sender, eventArgs) => Console.WriteLine("GotChannelListEnd");
-                        x.GotChannelListEntry += (sender, eventArgs) => Console.WriteLine("GotChannelListEntry");
-                        x.GotChannelTopicChange += (sender, eventArgs) => Console.WriteLine("GotChannelTopicChange");
-                        x.GotChatAction += (sender, eventArgs) => Console.WriteLine("GotChatAction");
-                        x.GotInvitation += (sender, eventArgs) => Console.WriteLine("GotInvitation");
-                        x.GotIrcError += (sender, eventArgs) => Console.WriteLine("GotIrcError: " + eventArgs.Error);
-                        x.GotJoinChannel += (sender, eventArgs) => Console.WriteLine("GotJoinChannel");
-                        x.GotLeaveChannel += (sender, eventArgs) => Console.WriteLine("GotLeaveChannel");
+                        x.GotIrcError += (sender, eventArgs) => Console.WriteLine("GotIrcError: " + eventArgs.Error + " " + eventArgs.Data.ToString());
                         x.GotMessage +=
                             (sender, eventArgs) =>
                                 {
@@ -314,28 +386,18 @@ namespace ch_ircbot
                                         " > " +
                                         message);
 
-                                    if (eventArgs.Recipient.ToString() != Me)
+                                    if (eventArgs.Recipient.ToString() != VanDevBot)
                                         return;
 
                                     var results = Record(sw, eventArgs.Sender.Nickname, message);
                                     foreach (var r in results)
                                         x.Message(r.Item1, r.Item2);
                                 };
-                        x.GotMode += (sender, eventArgs) => Console.WriteLine("GotMode");
-                        x.GotMotdBegin += (sender, eventArgs) => Console.WriteLine("GotMotdBegin");
-                        x.GotMotdText += (sender, eventArgs) => Console.WriteLine("GotMotdText");
-                        x.GotNameChange += (sender, eventArgs) => Console.WriteLine("GotNameChange");
-                        x.GotNameListEnd += (sender, eventArgs) => Console.WriteLine("GotNameListEnd");
-                        x.GotNameListReply += (sender, eventArgs) => Console.WriteLine("GotNameListReply");
                         x.GotNotice += (sender, eventArgs) =>
                             {
                                 Console.WriteLine("GotNotice: " + eventArgs.Message);
                                 notice = eventArgs.Message.ToString().ToUpperInvariant().Contains("NO IDENT");
                             };
-                        x.GotPingReply += (sender, eventArgs) => Console.WriteLine("GotPingReply");
-                        x.GotUserKicked += (sender, eventArgs) => Console.WriteLine("GotUserKicked");
-                        x.GotUserQuit += (sender, eventArgs) => Console.WriteLine("GotUserQuit");
-                        x.GotWelcomeMessage += (sender, eventArgs) => Console.WriteLine("GotWelcomeMessage");
                         x.Closed += (sender, eventArgs) =>
                             {
                                 Console.WriteLine("Closed");
@@ -348,7 +410,7 @@ namespace ch_ircbot
                                 connected = true;
                             };
                         x.Connect("chat.freenode.net");
-                        x.LogIn(Me, "none", Me, "chat.freenode.net");
+                        x.LogIn(VanDevBot, "none", VanDevBot, "chat.freenode.net");
 
                         var joined = false;
                         for (;;)
@@ -359,6 +421,9 @@ namespace ch_ircbot
                                 x.Join("#02ae4f8be6");
                                 x.Message("#02ae4f8be6", "test");
                                 joined = true;
+                                new Thread(RockBot).Start();
+                                new Thread(ScissorsBot).Start();
+                                new Thread(PaperBot).Start();
                             }
 
                             Thread.Sleep(100);
@@ -370,7 +435,7 @@ namespace ch_ircbot
                             {
                                 foreach (
                                     var r in
-                                        Record(sw, Me, "NEWMATCH DEMO " + " " + newMatch.Item1 + " " + newMatch.Item2))
+                                        Record(sw, VanDevBot, "NEWMATCH DEMO " + " " + newMatch.Item1 + " " + newMatch.Item2))
                                 {
                                     x.Message(r.Item1, r.Item2);
                                 }
@@ -390,7 +455,7 @@ namespace ch_ircbot
                                 var ms in
                                     Matches.Values.Where(match => match.TryResolve()))
                             {
-                                foreach (var r in Record(sw, Me, "RESULTMATCH " + ms.Id + " " + ms.Result))
+                                foreach (var r in Record(sw, VanDevBot, "RESULTMATCH " + ms.Id + " " + ms.Result))
                                 {
                                     x.Message(r.Item1, r.Item2);
                                 }
@@ -439,26 +504,27 @@ namespace ch_ircbot
             return ParseLine(line);
         }
 
+        private static T[] InplaceShuffle<T>(this T[] arr)
+        {
+            var length = arr.Length;
+            for (int i = 0; i < length; ++i)
+            {
+                Swap(ref arr,i,Rand.Next(i, length));
+            }
+            return arr;
+        }
+
         private static Tuple<string, string> PickTwoPlayersForNewMatch()
         {
             if (_lastMatchCreated.Add(CreationDelay) > GetTime()) return null;
 
             PlayerState[] possibles = null;
-            for (var i = 0; i < MaxSymoMatches; ++i)
-            {
-                possibles = Players.Values.Where(x => x.Alive && x.AliveMatchCount == i).ToArray();
-                if (possibles.Length >= 2)
-                {
-                    break;
-                }
-            }
+            possibles = Players.Values.ToArray().InplaceShuffle().Where(x => x.Alive && x.AliveMatchCount < MaxSymoMatches).ToArray();
 
-            if (possibles == null || possibles.Length < 2)
+            if (possibles.Length < 2)
             {
                 return null;
             }
-            Swap(ref possibles, Rand.Next(0, possibles.Length), 0);
-            Swap(ref possibles, Rand.Next(1, possibles.Length), 1);
 
             _lastMatchCreated = GetTime();
             return Tuple.Create(possibles[0].Name, possibles[1].Name);
@@ -647,9 +713,9 @@ namespace ch_ircbot
 
             public double Score()
             {
-                int total = Wins + Losses;
+                var total = Wins + Losses;
                 if (total == 0) return 0;
-                return Wins/(double)total;
+                return Wins/(double) total;
             }
         }
     }
