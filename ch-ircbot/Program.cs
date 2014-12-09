@@ -465,9 +465,9 @@ namespace ch_ircbot
                                 x.Join("#02ae4f8be6");
                                 x.Message("#02ae4f8be6", "test");
                                 joined = true;
-                                new Thread(RockBot).Start();
-                                new Thread(ScissorsBot).Start();
-                                new Thread(PaperBot).Start();
+                                //new Thread(RockBot).Start();
+                                //new Thread(ScissorsBot).Start();
+                                //new Thread(PaperBot).Start();
                             }
 
                             Thread.Sleep(100);
