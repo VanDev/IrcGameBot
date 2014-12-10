@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -10,7 +11,11 @@ namespace ch_ircbot
 {
     internal static class Program
     {
+#if DEBUG
+        private const string VanDevBot = "VanDevBotDebug";
+#else
         private const string VanDevBot = "VanDevBot7c34cb9";
+#endif
         private const int MaxSymoMatches = 2;
         private static readonly string[] LineSeparator = new[] {" | "};
 
@@ -73,13 +78,21 @@ namespace ch_ircbot
         private static IEnumerable<Tuple<string, string>> HandleLeaderboard(string eid, string playerName,
             string[] commandbits)
         {
-            yield return Tuple.Create(playerName, String.Join("; ",
-                Players.Values.OrderByDescending(p => p.Score())
+            yield return Tuple.Create(playerName, "DEMO " + String.Join("; ",
+                Players.Values.Select(p=>Tuple.Create(p,p.ResultsFor(_demo))).OrderByDescending(x => x.Item2.Score())
                     .Take(10)
                     .Select(
-                        p =>
-                            p.Name + " score=" + (p.Score().ToString("F3")) + " played=" +
-                                (p.Wins + p.Ties + p.Losses))));
+                        x =>
+                            x.Item1.Name + " score=" + (x.Item2.Score().ToString("F3")) + " played=" +
+                                (x.Item2.Wins + x.Item2.Ties + x.Item2.Losses))));
+
+            yield return Tuple.Create(playerName, "COMP " + String.Join("; ",
+                Players.Values.Select(p => Tuple.Create(p, p.ResultsFor(_comp))).OrderByDescending(x => x.Item2.Score())
+                    .Take(10)
+                    .Select(
+                        x =>
+                            x.Item1.Name + " score=" + (x.Item2.Score().ToString("F3")) + " played=" +
+                                (x.Item2.Wins + x.Item2.Ties + x.Item2.Losses))));
             yield break;
         }
 
@@ -138,9 +151,15 @@ namespace ch_ircbot
 
             if (ps != null)
             {
+                var demoResults = ps.ResultsFor(_demo);
                 yield return
                     Tuple.Create(playerName,
-                        String.Format("{0} WINS {1} LOSS {2} TIE {3} SCORE", ps.Wins, ps.Losses, ps.Ties, ps.Score()))
+                        String.Format("DEMO {0} WINS {1} LOSS {2} TIE {3} SCORE", demoResults.Wins, demoResults.Losses, demoResults.Ties, demoResults.Score()))
+                    ;
+                var compResults = ps.ResultsFor(_comp);
+                yield return
+                    Tuple.Create(playerName,
+                        String.Format("DEMO {0} WINS {1} LOSS {2} TIE {3} SCORE", compResults.Wins, compResults.Losses, compResults.Ties, compResults.Score()))
                     ;
                 yield break;
             }
@@ -184,22 +203,42 @@ namespace ch_ircbot
                     if (commandbits[2] == ms.Player1)
                     {
                         if (player1 != null)
-                            ++player1.Wins;
+                        {
+                            var results = player1.ResultsFor(ms.Mode);
+                            ++results.Wins;
+                        }
                         if (player2 != null)
-                            ++player2.Losses;
+                        {
+                            var results = player2.ResultsFor(ms.Mode);
+                            ++results.Losses;
+                        }
                     }
                     if (commandbits[2] == ms.Player2)
                     {
                         if (player1 != null)
-                            ++player1.Losses;
+                        {
+                            var results = player1.ResultsFor(ms.Mode);
+                            ++results.Losses;
+                        }
                         if (player2 != null)
-                            ++player2.Wins;
+                        {
+                            var results = player2.ResultsFor(ms.Mode);
+                            ++results.Wins;
+                        }
                     }
                 }
                 else
                 {
-                    if (player1 != null) ++player1.Ties;
-                    if (player2 != null) ++player2.Ties;
+                    if (player1 != null)
+                    {
+                        var results = player1.ResultsFor(ms.Mode);
+                        ++results.Ties;
+                    }
+                    if (player2 != null)
+                    {
+                        var results = player2.ResultsFor(ms.Mode);
+                        ++results.Ties;
+                    }
                 }
                 var message = "MATCH " + string.Join(" ", commandbits.Skip(1));
                 if (player1 != null)
@@ -428,7 +467,10 @@ namespace ch_ircbot
 
                                     var results = Record(sw, eventArgs.Sender.Nickname, message);
                                     foreach (var r in results)
+                                    {
+                                        Console.WriteLine(">>> " + r.Item1 + " >>> " + r.Item2);
                                         x.Message(r.Item1, r.Item2);
+                                    }
                                 };
                         x.GotNotice +=
                             (sender, eventArgs) =>
@@ -470,17 +512,21 @@ namespace ch_ircbot
                                 //new Thread(PaperBot).Start();
                             }
 
-                            Thread.Sleep(100);
+                            Thread.Yield();
+                            
                             if (!joined)
                                 continue;
 
                             var newMatch = PickTwoPlayersForNewMatch();
                             if (newMatch != null)
                             {
+                                var now = GetTime();
+                                var mode = ((now >= _compTimeStart) && (now < _compTimeEnd)) ? _comp : _demo;
+
                                 foreach (
                                     var r in
                                         Record(sw, VanDevBot,
-                                            "NEWMATCH DEMO " + " " + newMatch.Item1 + " " + newMatch.Item2))
+                                            "NEWMATCH " + mode + " " + " " + newMatch.Item1 + " " + newMatch.Item2))
                                 {
                                     x.Message(r.Item1, r.Item2);
                                 }
@@ -594,17 +640,30 @@ namespace ch_ircbot
             public readonly ConcurrentDictionary<string, MatchState> Matches =
                 new ConcurrentDictionary<string, MatchState>();
 
+            private static readonly Results NoResults = new Results();
+
             public PlayerState(string name)
             {
                 Name = name;
                 LastCommunication = GetTime();
-                Wins = 0;
-                Losses = 0;
+                ResultsByMode = new Dictionary<string, Results>();
             }
 
-            public int Wins { get; set; }
-            public int Losses { get; set; }
-            public int Ties { get; set; }
+            internal class Results
+            {
+                public int Wins = 0;
+                public int Losses = 0;
+                public int Ties = 0;
+
+                public double Score()
+                {
+                    var total = Wins + Losses;
+                    if (total == 0) return 0;
+                    return Wins / (double)total;
+                }
+            }
+            public IDictionary<string, Results> ResultsByMode { get; private set; }
+
             public DateTime LastCommunication { get; set; }
 
             public bool Alive
@@ -631,15 +690,24 @@ namespace ch_ircbot
                 Matches.TryAdd(ms.Id, ms);
             }
 
-            public double Score()
+            public Results ResultsFor(string mode)
             {
-                var total = Wins + Losses;
-                if (total == 0) return 0;
-                return Wins/(double) total;
+                Results r;
+                if (ResultsByMode.TryGetValue(mode, out r))
+                {
+                    return r;
+                };
+                r = new Results();
+                ResultsByMode[mode] = r;
+                return r;
             }
         }
 
-        private static readonly TimeSpan MatchTimeout = TimeSpan.FromSeconds(60);
+        private static readonly TimeSpan MatchTimeout = TimeSpan.FromSeconds(600);
+        private static readonly DateTime _compTimeStart = DateTime.Parse("2014-12-10T07:00:00Z",CultureInfo.InvariantCulture,DateTimeStyles.AssumeUniversal).ToUniversalTime();
+        private static readonly DateTime _compTimeEnd = DateTime.Parse("2014-12-10T15:00:00Z", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal).ToUniversalTime();
+        private static readonly string _comp = "COMP";
+        private static readonly string _demo = "DEMO";
         private const string IrcServer = "ec2-54-173-131-206.compute-1.amazonaws.com";
 
         static internal bool TryResolve(IMatchState ms)
